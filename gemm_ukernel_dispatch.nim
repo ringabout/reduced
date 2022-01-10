@@ -1,5 +1,4 @@
-import
-  macros, typetraits
+import macros
 
 type
   MicroKernel* = object
@@ -59,8 +58,6 @@ template withCompilerOptimHints*() =
   {.pragma: align_variable, codegenDecl: "$# $# __attribute__((aligned(" & $LASER_MEM_ALIGN & ")))".}
   {.pragma: restrict, codegenDecl: "$# __restrict__ $#".}
 
-const withBuiltins = defined(gcc) or defined(clang) or defined(icc)
-
 type
   PrefetchRW* {.size: cint.sizeof.} = enum
     Read = 0
@@ -70,37 +67,21 @@ type
     LowTemporalLocality = 1
     ModerateTemporalLocality = 2
     HighTemporalLocality = 3 # Data should be left in all levels of cache possible
-    # Translation
-    # 0 - use no cache eviction level
-    # 1 - L1 cache eviction level
-    # 2 - L2 cache eviction level
-    # 3 - L1 and L2 cache eviction level
 
-when withBuiltins:
-  proc builtin_assume_aligned(data: pointer, alignment: csize_t): pointer {.importc: "__builtin_assume_aligned", noDecl.}
-  proc builtin_prefetch(data: pointer, rw: PrefetchRW, locality: PrefetchLocality) {.importc: "__builtin_prefetch", noDecl.}
-
+proc builtin_assume_aligned(data: pointer, alignment: csize_t): pointer {.importc: "__builtin_assume_aligned", noDecl.}
+proc builtin_prefetch(data: pointer, rw: PrefetchRW, locality: PrefetchLocality) {.importc: "__builtin_prefetch", noDecl.}
 
 template assume_aligned*[T](data: ptr T, alignment: static int = LASER_MEM_ALIGN): ptr T =
-  if withBuiltins:
-    cast[ptr T](builtin_assume_aligned(data, alignment))
-  else:
-    data
+  cast[ptr T](builtin_assume_aligned(data, alignment))
 
 template prefetch*[T](
             data: ptr (T or UncheckedArray[T]),
             rw: static PrefetchRW = Read,
             locality: static PrefetchLocality = HighTemporalLocality) =
-  when withBuiltins:
-    builtin_prefetch(data, rw, locality)
-  else:
-    discard
+  builtin_prefetch(data, rw, locality)
 
 template pragma_ivdep() {.used.}=
-  when defined(gcc):
-    {.emit: "#pragma GCC ivdep".}
-  else: # Supported on ICC and Cray
-    {.emit: "pragma ivdep".}
+  {.emit: "#pragma GCC ivdep".}
 
 template withCompilerFunctionHints() {.used.}=
   {.pragma: aligned_ptr_result, codegenDecl: "__attribute__((assume_aligned(" & $LASER_MEM_ALIGN & ")) $# $#$#".}
@@ -112,8 +93,7 @@ template withCompilerFunctionHints() {.used.}=
   {.pragma: gcc_const, codegenDecl: "__attribute__((const)) $# $#$#".}
 
 
-func align_raw_data*(T: typedesc, p: pointer): ptr UncheckedArray[T] =
-  static: assert T.supportsCopyMem
+func align_raw_data(T: typedesc, p: pointer): ptr UncheckedArray[T] =
   withCompilerOptimHints()
 
   let address = cast[ByteAddress](p)
@@ -127,11 +107,11 @@ func align_raw_data*(T: typedesc, p: pointer): ptr UncheckedArray[T] =
   return aligned_ptr
 
 
-func `+`*(p: ptr, offset: int): type(p) {.inline.}=
+func `+`(p: ptr, offset: int): type(p) {.inline.}=
   ## Pointer increment
   {.emit: "`result` = `p` + `offset`;".}
 
-template to_ptr*(AB: typed, MR, NR: static int, T: typedesc): untyped =
+template to_ptr(AB: typed, MR, NR: static int, T: typedesc): untyped =
   assume_aligned cast[ptr array[MR, array[NR, T]]](AB[0][0].unsafeaddr)
 
 type
@@ -150,28 +130,12 @@ type
     b_alloc_mem: pointer
     # The Tiles data structure takes 64-byte = 1 cache-line
 
-
-proc deallocTiles*[T](tiles: Tiles[T]) =
-  if tiles.isNil:
-    return
-
-  if not tiles.a_alloc_mem.isNil:
-    deallocShared tiles.a_alloc_mem
-  if not tiles.b_alloc_mem.isNil:
-    deallocShared tiles.b_alloc_mem
-
-  freeShared(tiles)
-
 proc newTiles*(
         ukernel: static MicroKernel,
         T: typedesc,
         M, N, K: Natural,
         ): Tiles[T] =
   result = createSharedU(TilesObj[T])
-
-  const
-    nr = ukernel.nr
-    mr = ukernel.mr
 
   result.upanelA_size = result.kc
   let bufA_size = T.sizeof * result.upanelA_size * result.ic_num_tasks
@@ -340,7 +304,6 @@ proc gebb_ukernel_fallback*[T; ukernel: static MicroKernel](
     ) =
   ukernel_generic_impl()
 
-  const is_c_unit_stride = ukernel.extract_c_unit_stride
   gebb_ukernel_epilogue_fallback(alpha, to_ptr(AB, MR, NR, T), beta, vC)
 
 # ############################################################
@@ -426,9 +389,6 @@ template ukernel_simd_proc(ukernel_name, epilogue_name: NimNode, edge: bool) {.d
           MR = ukernel.mr
           NR = ukernel.nr
 
-        # when is_c_unit_stride:
-        #   `epilogue_name`(alpha, AB, beta, vC)
-        # else:
         gebb_ukernel_epilogue_fallback(
           alpha, to_ptr(AB, MR, NR, `T`),
           beta, vC)
