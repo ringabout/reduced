@@ -1,7 +1,53 @@
 import
-  macros, typetraits,
-  ./gemm_tiling
+  macros, typetraits
 
+type
+  MicroKernel* = object
+    mr*, nr*: int
+    cpu_simd*: CPUFeatureX86
+    nb_scalars*: int # Ideally MicroKernel should be generic over T
+    nb_vecs_nr*: int
+    c_unit_stride*: bool # We can use SIMD for the epilogue of C has a unit_stride
+    pt*: int # Parallelization threshold
+
+  CPUFeatureX86* = enum
+    x86_Generic,
+    x86_SSE,
+    x86_SSE2,
+    x86_SSE4_1,
+    x86_AVX,
+    x86_AVX_FMA,
+    x86_AVX2,
+    x86_AVX512
+
+
+func x86_ukernel*(cpu: CPUFeatureX86, T: typedesc, c_unit_stride: bool): MicroKernel =
+  result.cpu_simd = cpu
+  result.c_unit_stride = c_unit_stride
+  result.pt = 128
+  result.nb_scalars = max(1, 512 div 8 div T.sizeof)
+
+  result.mr = 14                 # 2~6 registers for the rows of Ã
+  result.nb_vecs_nr = 2
+  result.nr = result.nb_vecs_nr * result.nb_scalars
+
+type
+  MatrixView*[T] = object
+    buffer*: ptr UncheckedArray[T]
+    rowStride*, colStride*: int
+
+func toMatrixView*[T](data: ptr T, rowStride, colStride: int): MatrixView[T] {.inline.} =
+  result.buffer = cast[ptr UncheckedArray[T]](data)
+  result.rowStride = rowStride
+  result.colStride = colStride
+
+template `[]`*[T](view: MatrixView[T], row, col: Natural): T =
+  ## Access like a 2D matrix
+  view.buffer[row * view.rowStride + col * view.colStride]
+
+template `[]=`*[T](view: MatrixView[T], row, col: Natural, value: T) =
+  ## Access like a 2D matrix
+  view.buffer[row * view.rowStride + col * view.colStride] = value
 
 
 const LASER_MEM_ALIGN*{.intdefine.} = 64
@@ -1071,3 +1117,4 @@ proc gebb_ukernel*[T; ukernel: static MicroKernel](
       beta: T, vC: MatrixView[T]
     ){.inline.} =
   ukernel.dispatch_general(kc, alpha, packedA, packedB, beta, vC)
+
